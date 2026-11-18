@@ -74,7 +74,7 @@ npm run test:smoke
 npm audit
 ```
 
-Unit/integration dùng Node test runner + tsx; integration tạo MongoDB 7.0.14 replica set tạm bằng mongodb-memory-server. Lần đầu cần tải binary. Bộ test không load `.env.local`, không dùng Atlas. HTTP smoke khởi chạy Next production build trên cổng 3101 với database tạm, kiểm tra auth/CSRF/RBAC, POS, Social, hoàn/hủy và hoàn kho, JSON/CSV/XLSX theo ca, chốt ca và audit, rồi tắt server/xóa MongoDB tạm. Chạy smoke sau build. CI chạy typecheck, 29 tests, build và 17 HTTP smoke checks.
+Unit/integration dùng Node test runner + tsx; integration tạo MongoDB 7.0.14 replica set tạm bằng mongodb-memory-server. Lần đầu cần tải binary. Bộ test không load `.env.local`, không dùng Atlas. HTTP smoke khởi chạy Next production build trên cổng 3101 với database tạm, kiểm tra auth/CSRF/RBAC, POS, Social, hoàn/hủy và hoàn kho, JSON/CSV/XLSX theo ca, chốt ca và audit, rồi tắt server/xóa MongoDB tạm. Chạy smoke sau build. CI chạy typecheck, 30 tests, build và 17 HTTP smoke checks.
 
 ## Triển khai Vercel
 

@@ -135,7 +135,7 @@ export async function buildShiftReport(
     .lean();
   const guests = await Social.find({ shift: shiftId })
     .session(session)
-    .sort({ joinedAt: 1 })
+    .sort({ joinedAt: 1, _id: 1 })
     .lean();
   const stockRows =
     s.status === "closed" && s.stockSnapshot
@@ -248,6 +248,7 @@ export async function buildShiftReport(
       };
     },
   );
+  const legacyUnits = new Map<string, Set<number>>();
   const social = guests.map((g) => {
     const sale = sales.find((s) => String(s._id) === String(g.sale));
     let price = g.ticketPrice ?? null;
@@ -257,9 +258,17 @@ export async function buildShiftReport(
       for (let i = 0; i < sale.lines.length; i++) {
         const l = sale.lines[i];
         const guestNames: string[] = l.guestNames || l.guests || [];
+        const unitKey = String(sale._id) + ":" + i;
+        const used = legacyUnits.get(unitKey) || new Set<number>();
         let guestIndex = l.socialIds?.indexOf(String(g._id)) ?? -1;
-        if (guestIndex < 0) guestIndex = guestNames.indexOf(g.name);
+        if (guestIndex >= 0) guestIndex += l.guests?.length || 0;
+        else
+          guestIndex = guestNames.findIndex(
+            (name, index) => name === g.name && !used.has(index),
+          );
         if (l.kind === "social" && (g.lineIndex === i || guestIndex >= 0)) {
+          used.add(Math.max(0, guestIndex));
+          legacyUnits.set(unitKey, used);
           price = l.price;
           payment = unitPayment(
             sale.cash,

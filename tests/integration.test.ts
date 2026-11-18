@@ -91,6 +91,49 @@ function order(quantity = 1, key = crypto.randomUUID()) {
   };
 }
 describe("real MongoDB transactions", () => {
+  it("reconstructs legacy Social allocations without assigning the same cash twice to duplicate names", async () => {
+    const ticket = await Product.create({
+      name: "Social",
+      category: "Drinks",
+      kind: "social",
+      variants: [{ name: "Sáng", price: 30000 }],
+    });
+    const sale = await checkout(u, {
+      ...order(),
+      lines: [
+        {
+          product: String(ticket._id),
+          variant: "Sáng",
+          quantity: 2,
+          guests: ["An", "An"],
+        },
+      ],
+      cash: 30000,
+      transfer: 30000,
+    });
+    await Social.collection.updateMany(
+      { sale: sale._id },
+      {
+        $unset: {
+          ticketPrice: "",
+          cash: "",
+          transfer: "",
+          lineIndex: "",
+          paymentStatus: "",
+        },
+      },
+    );
+    const r = await getShiftReport(u, String(shift._id));
+    assert.equal(r.social.length, 2);
+    assert.equal(
+      r.social.reduce((n, g) => n + g.cash, 0),
+      30000,
+    );
+    assert.equal(
+      r.social.reduce((n, g) => n + g.transfer, 0),
+      30000,
+    );
+  });
   it("deducts three no-ice and two iced bottles from the same stock only on committed checkout", async () => {
     assert.equal((await Stock.findOne()).remaining, 24);
     await checkout(u, {
