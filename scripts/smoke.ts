@@ -229,7 +229,11 @@ async function main() {
     r = await request("/api/reports?format=xlsx&shift=" + shift._id, admin);
     assert.equal(r.status, 200);
     const wb = new ExcelJS.Workbook();
-    await wb.xlsx.load(Buffer.from(await r.arrayBuffer()) as unknown as Parameters<typeof wb.xlsx.load>[0]);
+    await wb.xlsx.load(
+      Buffer.from(await r.arrayBuffer()) as unknown as Parameters<
+        typeof wb.xlsx.load
+      >[0],
+    );
     assert.ok(wb.worksheets[0].rowCount > 10);
     check("Excel report parses successfully");
     r = await request("/api/workspace", cashier, {

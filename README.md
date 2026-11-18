@@ -63,7 +63,7 @@ npm run test:smoke
 npm audit
 ```
 
-Unit/integration dùng Node test runner + tsx; integration tạo MongoDB 7.0.14 replica set tạm bằng mongodb-memory-server. Lần đầu cần tải binary. Bộ test không load `.env.local`, không dùng Atlas. HTTP smoke khởi chạy Next production build trên cổng 3101 với database tạm, kiểm tra auth/CSRF/RBAC, POS, Social, CSV/XLSX, chốt ca và audit, rồi tắt server/xóa MongoDB tạm. Chạy smoke sau build. CI chạy typecheck, 19 tests và build; smoke có thể chạy riêng khi cần kiểm tra HTTP.
+Unit/integration dùng Node test runner + tsx; integration tạo MongoDB 7.0.14 replica set tạm bằng mongodb-memory-server. Lần đầu cần tải binary. Bộ test không load `.env.local`, không dùng Atlas. HTTP smoke khởi chạy Next production build trên cổng 3101 với database tạm, kiểm tra auth/CSRF/RBAC, POS, Social, CSV/XLSX, chốt ca và audit, rồi tắt server/xóa MongoDB tạm. Chạy smoke sau build. CI chạy typecheck, 19 tests, build và 14 HTTP smoke checks.
 
 ## Triển khai Vercel
 
@@ -71,10 +71,30 @@ Unit/integration dùng Node test runner + tsx; integration tạo MongoDB 7.0.14 
 2. Khai báo Environment Variables cho **Preview**: `MONGODB_URI` chứa tên database preview riêng, `SESSION_SECRET` ngẫu nhiên ít nhất 32 ký tự. Không đưa seed password lên Vercel. Bật system environment variables để có `VERCEL_URL`.
 3. `APP_ORIGIN`: local đặt `http://localhost:3000`; Vercel Preview có thể bỏ trống và ứng dụng dùng `https://${VERCEL_URL}`. Dùng URL deployment chính xác khi kiểm thử, alias khác cần `APP_ORIGIN` tương ứng. Production đặt đúng origin HTTPS chính thức.
 4. Seed catalog/admin có kiểm soát vào đúng database trước khi vận hành. Atlas database user chỉ cấp quyền database của ứng dụng. Cấu hình Atlas network access để Vercel kết nối; chọn networking phù hợp tài khoản/plan, không tự đổi access list của cluster dùng chung.
-5. `vercel --target=preview` → kiểm tra đăng nhập, role, mở/thu/chốt ca **chỉ trên database kiểm thử**, mobile 390px, iPad 768/1024px, in và download. Vercel deployment protection có thể yêu cầu đăng nhập tài khoản được cấp quyền.
+5. `vercel deploy --environment=preview` → kiểm tra đăng nhập, role, mở/thu/chốt ca **chỉ trên database kiểm thử**, mobile 390px, iPad 768/1024px, in và download. Vercel deployment protection có thể yêu cầu đăng nhập tài khoản được cấp quyền. Vercel CLI yêu cầu deployment đầu tiên của project mới mang nhãn Production: chỉ khi chủ dự án cho phép, dùng trang bảo trì tĩnh `deployment/bootstrap` để khởi tạo; không triển khai ứng dụng thu ngân trước khi Preview PASS.
 6. Chỉ sau khi Preview và các gate đều PASS mới cấu hình database **Production riêng**, tạo tài khoản thật/catalog và deploy `vercel --prod`. Không chạy smoke/seed giao dịch giả trên Production. Không dùng cùng database Preview và Production.
 
 Secrets chỉ nằm trong environment variables hoặc `.env.local`; `.env*`, `.vercel`, `.cache`, build artifacts đều được Git bỏ qua. Nếu credential bị lộ, chủ tài khoản cần rotate trước khi Production. Backup, retention/audit, giám sát lỗi và chính sách tài khoản phải được chủ sân cấu hình trước vận hành thực tế.
+
+### Kiểm tra deployment thực
+
+```powershell
+# Vercel CLI đã đăng nhập, deployment ở trạng thái READY.
+node --env-file=.env.local scripts/check-preview.mjs <IMMUTABLE_PREVIEW_URL>
+# Chỉ database pickleball_cashier_preview: tạo fixture QA có tên riêng,
+# kiểm tra Atlas đồng thời/thu/chốt ca, rồi xóa đúng fixture đó trong transaction.
+node --env-file=.env.local scripts/check-preview-workflow.mjs <IMMUTABLE_PREVIEW_URL>
+```
+
+Script đọc secrets từ environment, truyền mật khẩu/cookie qua stdin cho Vercel curl; không in secrets. Workflow từ chối chạy nếu URI không phải database Preview chuyên biệt hoặc Preview đã có ca trước đó. Kết quả QA được ghi lại bằng audit `preview.qa.completed`. Không dùng script workflow trên Production.
+
+`scripts/configure-production.mjs` chỉ tạo `.env.production.local` bị Git bỏ qua, với database Production riêng, SESSION_SECRET và mật khẩu Admin mới; không kết nối MongoDB. Chỉ seed catalog/admin và đưa secrets lên Vercel Production sau khi Preview PASS. Sau deploy, kiểm tra chỉ đọc:
+
+```powershell
+node --env-file=.env.production.local scripts/check-preview.mjs https://pickleball-cashier.vercel.app --production-readonly
+```
+
+Đọc email/mật khẩu Production trong `.env.production.local` trên máy, không đăng lên Git/chat. Tài khoản Preview và Production có mật khẩu khác nhau. Phiên bản Node được cố định `24.x` cho local, CI và Vercel.
 
 ## Tài liệu nền tảng
 
