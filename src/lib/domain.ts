@@ -50,6 +50,30 @@ export function assertPayment(total: number, cash: number, transfer: number) {
 export function expectedCash(opening: number, sales: number) {
   return opening + sales;
 }
+export const reversalInput = z
+  .object({
+    key: z.string().uuid(),
+    shift: id,
+    sale: id,
+    kind: z.enum(["refund", "cancel"]),
+    reason: z.string().trim().min(3).max(500),
+    restock: z
+      .array(
+        z.object({
+          lineIndex: z.number().int().min(0).max(99),
+          quantity: z.number().int().min(0).max(1000),
+        }),
+      )
+      .max(100),
+  })
+  .refine(
+    (b) => new Set(b.restock.map((r) => r.lineIndex)).size === b.restock.length,
+    "Dòng hoàn kho bị trùng",
+  );
+export function unitPayment(cash: number, offset: number, price: number) {
+  const paidCash = Math.min(price, Math.max(0, cash - offset));
+  return { cash: paidCash, transfer: price - paidCash };
+}
 export function csvCell(v: unknown) {
   let s = String(v ?? "");
   if (/^[=+@\-\t\r]/.test(s)) s = "'" + s;

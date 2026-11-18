@@ -1,14 +1,26 @@
 import { actor, roles, HttpError } from "@/lib/auth";
-import { Sale, Shift, Social } from "@/lib/models";
+import { Sale, Shift, Social, Reversal } from "@/lib/models";
 import { id } from "@/lib/domain";
 import { errorResponse } from "@/lib/http";
-import { exportRows } from "@/lib/report";
+import { exportRows, shiftReportRows } from "@/lib/report";
+import { getShiftReport } from "@/lib/shift-report";
 export async function GET(req: Request) {
   try {
     const u = await actor();
-    roles(u, ["Admin", "Manager"]);
     const url = new URL(req.url);
     const shift = url.searchParams.get("shift");
+    if (shift) {
+      const report = await getShiftReport(u, shift);
+      if (url.searchParams.get("format") === "json")
+        return Response.json(report, {
+          headers: { "Cache-Control": "no-store" },
+        });
+      return exportRows(
+        shiftReportRows(report),
+        url.searchParams.get("format") || "xlsx",
+      );
+    }
+    roles(u, ["Admin", "Manager"]);
     if (shift) id.parse(shift);
     const dates: Record<string, Date> = {};
     for (const [key, value] of [
@@ -54,21 +66,29 @@ export async function GET(req: Request) {
         "Chuyển khoản đơn",
       ],
     ];
+    const reversals = await Reversal.find({
+      sale: { $in: sales.map((s) => s._id) },
+    }).lean();
+    const reversed = new Set(reversals.map((r) => String(r.sale)));
     const productTotals = new Map<string, number>(),
       staffTotals = new Map<string, number>(),
       dayTotals = new Map<string, number>();
     for (const s of sales) {
+      const active = !reversed.has(String(s._id));
       let first = true;
       const day = new Date(s.createdAt).toLocaleDateString("vi-VN", {
         timeZone: "Asia/Ho_Chi_Minh",
       });
-      dayTotals.set(day, (dayTotals.get(day) || 0) + s.total);
+      dayTotals.set(day, (dayTotals.get(day) || 0) + (active ? s.total : 0));
       const staff = s.employee?.name || String(s.employee);
-      staffTotals.set(staff, (staffTotals.get(staff) || 0) + s.total);
+      staffTotals.set(
+        staff,
+        (staffTotals.get(staff) || 0) + (active ? s.total : 0),
+      );
       for (const l of s.lines) {
         productTotals.set(
           l.name,
-          (productTotals.get(l.name) || 0) + l.subtotal,
+          (productTotals.get(l.name) || 0) + (active ? l.subtotal : 0),
         );
         rows.push([
           String(s._id),
@@ -80,16 +100,23 @@ export async function GET(req: Request) {
           l.name,
           l.variant,
           l.quantity,
-          l.subtotal,
-          first ? s.cash : "",
-          first ? s.transfer : "",
+          active ? l.subtotal : 0,
+          first ? (active ? s.cash : 0) : "",
+          first ? (active ? s.transfer : 0) : "",
         ]);
         first = false;
       }
     }
     rows.push(
       [],
-      ["TỔNG", sales.reduce((n, s) => n + s.total, 0)],
+      [
+        "TỔNG",
+        sales.reduce(
+          (n, s) => n + (reversed.has(String(s._id)) ? 0 : s.total),
+          0,
+        ),
+      ],
+      ["Tổng hoàn/hủy", reversals.reduce((n, r) => n + r.total, 0)],
       ["Số lượt Social", guests.length],
       ["Social sáng", guests.filter((g) => g.period === "morning").length],
       ["Social tối", guests.filter((g) => g.period === "evening").length],

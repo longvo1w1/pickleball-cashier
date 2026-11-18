@@ -168,9 +168,13 @@ try {
     [30000, 50000],
   );
   pass("Seeded catalog, prices and inventory configuration");
-  assert.equal(data.sales.length, 0);
-  assert.equal(data.shifts.length, 0);
-  pass("Preview has no fabricated sales or shifts");
+  if (!production) {
+    assert.equal(data.sales.length, 0);
+    assert.equal(data.shifts.length, 0);
+    pass("Preview QA fixtures are absent");
+  } else {
+    pass("Production workspace read without creating or changing sales/shifts");
+  }
   r = await request("/api/reports?format=csv", undefined, cookie);
   assert.equal(r.status, 200);
   assert.ok(r.body.toString().includes("Social"));

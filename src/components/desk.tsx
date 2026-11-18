@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { money } from "@/lib/utils";
+import { ShiftReportView, ReverseSaleForm } from "./shift-report-view";
 type Product = {
   _id: string;
   name: string;
@@ -40,6 +41,7 @@ type Stock = {
   opening: number;
   added: number;
   sold: number;
+  returned?: number;
   adjustment: number;
   remaining: number;
   counted?: number;
@@ -65,6 +67,10 @@ type Sale = {
   total: number;
   cash: number;
   transfer: number;
+  netTotal?: number;
+  netCash?: number;
+  netTransfer?: number;
+  status?: string;
   lines: {
     name: string;
     kind: string;
@@ -78,6 +84,7 @@ type Guest = {
   name: string;
   period: string;
   paid: boolean;
+  paymentStatus?: string;
   joinedAt: string;
 };
 type User = { _id: string; name: string; role: string; email?: string };
@@ -91,6 +98,7 @@ type Data = {
   social: Guest[];
   shifts: Shift[];
   users: User[];
+  hasMoreShifts?: boolean;
   audits: {
     _id: string;
     actor?: { name: string };
@@ -196,11 +204,12 @@ export function Desk() {
     [modal, setModal] = useState<string | null>(null),
     [editing, setEditing] = useState<Product | null>(null),
     [reportFrom, setReportFrom] = useState(""),
-    [reportTo, setReportTo] = useState("");
+    [reportTo, setReportTo] = useState(""),
+    [shiftPage, setShiftPage] = useState(0);
   const key = useRef<string | null>(null);
   const refresh = useCallback(async () => {
     try {
-      const d = await api("/api/workspace");
+      const d = await api("/api/workspace?shiftPage=" + shiftPage);
       setData(d);
     } catch (e) {
       if (
@@ -212,7 +221,7 @@ export function Desk() {
     } finally {
       setLoaded(true);
     }
-  }, []);
+  }, [shiftPage]);
   useEffect(() => {
     void refresh();
   }, [refresh]);
@@ -998,6 +1007,8 @@ export function Desk() {
                       <th>Tiền mặt</th>
                       <th>Chuyển khoản</th>
                       <th>Tổng</th>
+                      <th>Trạng thái</th>
+                      <th />
                     </tr>
                   </thead>
                   <tbody>
@@ -1013,9 +1024,30 @@ export function Desk() {
                             </p>
                           ))}
                         </td>
-                        <td>{money(s.cash)}</td>
-                        <td>{money(s.transfer)}</td>
-                        <td className="font-semibold">{money(s.total)}</td>
+                        <td>{money(s.netCash ?? s.cash)}</td>
+                        <td>{money(s.netTransfer ?? s.transfer)}</td>
+                        <td className="font-semibold">
+                          {money(s.netTotal ?? s.total)}
+                        </td>
+                        <td>
+                          {s.status === "refunded"
+                            ? "Đã hoàn"
+                            : s.status === "cancelled"
+                              ? "Đã hủy"
+                              : "Đã thu"}
+                        </td>
+                        <td>
+                          {manager &&
+                            data.shift?._id === s.shift &&
+                            s.status === "paid" && (
+                              <Button
+                                variant="outline"
+                                onClick={() => setModal("reverse:" + s._id)}
+                              >
+                                Hoàn/hủy
+                              </Button>
+                            )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -1143,6 +1175,7 @@ export function Desk() {
                       <th>Đầu ca</th>
                       <th>Nhập thêm</th>
                       <th>Đã bán</th>
+                      <th>Hoàn kho</th>
                       <th>Điều chỉnh</th>
                       <th>Còn lại</th>
                     </tr>
@@ -1157,6 +1190,7 @@ export function Desk() {
                         <td>{s.opening}</td>
                         <td>{s.added}</td>
                         <td>{s.sold}</td>
+                        <td>{s.returned || 0}</td>
                         <td>{s.adjustment}</td>
                         <td>
                           <span className="tag">{s.remaining} chai</span>
@@ -1216,7 +1250,13 @@ export function Desk() {
                               g.paid ? "tag" : "text-amber-700 text-xs"
                             }
                           >
-                            {g.paid ? "Đã thanh toán" : "Chưa thanh toán"}
+                            {g.paid
+                              ? "Đã thanh toán"
+                              : g.paymentStatus === "refunded"
+                                ? "Đã hoàn"
+                                : g.paymentStatus === "cancelled"
+                                  ? "Đã hủy"
+                                  : "Chưa thanh toán"}
                           </span>
                         </td>
                         <td>
@@ -1356,6 +1396,25 @@ export function Desk() {
               </div>
             </section>
           )}
+          {tab === "Quản lý ca" && (
+            <div className="no-print flex justify-between items-center my-4">
+              <Button
+                variant="outline"
+                disabled={shiftPage === 0 || busy}
+                onClick={() => setShiftPage((p) => p - 1)}
+              >
+                Ca mới hơn
+              </Button>
+              <span>Trang {shiftPage + 1}</span>
+              <Button
+                variant="outline"
+                disabled={!data.hasMoreShifts || busy}
+                onClick={() => setShiftPage((p) => p + 1)}
+              >
+                Ca cũ hơn
+              </Button>
+            </div>
+          )}
           {tab === "Báo cáo" && manager && (
             <section>
               <div className="flex flex-wrap gap-3 justify-between items-end mb-5">
@@ -1430,16 +1489,21 @@ export function Desk() {
                 for (const s of ss) {
                   staffTotals.set(
                     s.employee?.name || "—",
-                    (staffTotals.get(s.employee?.name || "—") || 0) + s.total,
+                    (staffTotals.get(s.employee?.name || "—") || 0) +
+                      (s.netTotal ?? s.total),
                   );
                   const d = new Date(s.createdAt).toLocaleDateString("vi-VN", {
                     timeZone: "Asia/Ho_Chi_Minh",
                   });
-                  dayTotals.set(d, (dayTotals.get(d) || 0) + s.total);
+                  dayTotals.set(
+                    d,
+                    (dayTotals.get(d) || 0) + (s.netTotal ?? s.total),
+                  );
                   for (const l of s.lines)
                     productTotals.set(
                       l.name,
-                      (productTotals.get(l.name) || 0) + l.subtotal,
+                      (productTotals.get(l.name) || 0) +
+                        (s.status === "paid" ? l.subtotal : 0),
                     );
                 }
                 return (
@@ -1448,18 +1512,32 @@ export function Desk() {
                       {[
                         [
                           "Tổng doanh thu",
-                          money(ss.reduce((n, s) => n + s.total, 0)),
+                          money(
+                            ss.reduce((n, s) => n + (s.netTotal ?? s.total), 0),
+                          ),
                         ],
-                        ["Tiền mặt", money(ss.reduce((n, s) => n + s.cash, 0))],
+                        [
+                          "Tiền mặt",
+                          money(
+                            ss.reduce((n, s) => n + (s.netCash ?? s.cash), 0),
+                          ),
+                        ],
                         [
                           "Chuyển khoản",
-                          money(ss.reduce((n, s) => n + s.transfer, 0)),
+                          money(
+                            ss.reduce(
+                              (n, s) => n + (s.netTransfer ?? s.transfer),
+                              0,
+                            ),
+                          ),
                         ],
                         [
                           "Lượt Social đã trả",
                           String(
                             ss
-                              .flatMap((s) => s.lines)
+                              .flatMap((s) =>
+                                s.status === "paid" ? s.lines : [],
+                              )
                               .filter((l) => l.kind === "social")
                               .reduce((n, l) => n + l.quantity, 0),
                           ),
@@ -1620,6 +1698,7 @@ export function Desk() {
                   submit(e, "closeShift", (f) => ({
                     shift: data.shift!._id,
                     countedCash: Number(f.get("countedCash")),
+                    note: String(f.get("note") || ""),
                     counts: data.stocks.map((s) => ({
                       product: s.product,
                       counted: Number(f.get(s.product)),
@@ -1653,6 +1732,9 @@ export function Desk() {
                     <Num name={s.product} defaultValue={s.remaining} />
                   </Field>
                 ))}
+                <Field title="Ghi chú chốt / bàn giao">
+                  <textarea name="note" maxLength={500} />
+                </Field>
                 <Button disabled={busy} className="w-full">
                   Xác nhận chốt ca
                 </Button>
@@ -1928,61 +2010,22 @@ export function Desk() {
                 <Button disabled={busy}>Tạo tài khoản</Button>
               </form>
             )}
-            {modal.startsWith("shift:") &&
+            {modal.startsWith("shift:") && (
+              <ShiftReportView key={modal} shiftId={modal.slice(6)} />
+            )}
+            {modal.startsWith("reverse:") &&
               (() => {
-                const s = data.shifts.find((s) => "shift:" + s._id === modal)!;
-                return (
-                  <div className="space-y-4">
-                    <h2 className="text-xl font-semibold">
-                      Báo cáo ca #{s._id.slice(-6)}
-                    </h2>
-                    <p>
-                      Mở lúc: {date(s.createdAt)} ·{" "}
-                      {s.status === "closed" ? "Đã chốt" : "Đang mở"}
-                    </p>
-                    {[
-                      ["Tiền mặt đầu ca", s.openingCash],
-                      ["Doanh thu tiền mặt", s.cashSales],
-                      ["Doanh thu chuyển khoản", s.transferSales],
-                      ["Tiền dự kiến", s.openingCash + s.cashSales],
-                      ["Tiền thực đếm", s.countedCash],
-                      ["Thừa / thiếu", s.cashDifference],
-                    ].map(([t, v]) => (
-                      <div
-                        className="flex justify-between border-b border-stone-100 pb-2"
-                        key={t}
-                      >
-                        <span>{t}</span>
-                        <strong>
-                          {v === undefined ? "—" : money(Number(v))}
-                        </strong>
-                      </div>
-                    ))}
-                    {s.stockSnapshot?.map((st) => (
-                      <div key={st.product} className="text-xs">
-                        <strong>
-                          {data.products.find((p) => p._id === st.product)
-                            ?.name || st.product}
-                        </strong>
-                        <p className="muted mt-1">
-                          Đầu {st.opening} · Nhập {st.added} · Bán {st.sold} ·
-                          Điều chỉnh {st.adjustment} · Dự kiến {st.remaining} ·
-                          Đếm {st.counted} · Lệch {st.difference}
-                        </p>
-                      </div>
-                    ))}
-                    <div className="no-print flex gap-2">
-                      <Button onClick={() => window.print()}>In chốt ca</Button>
-                      {manager && (
-                        <Button variant="outline" asChild>
-                          <a href={"/api/reports?format=xlsx&shift=" + s._id}>
-                            Xuất Excel
-                          </a>
-                        </Button>
-                      )}
-                    </div>
-                  </div>
+                const sale = data.sales.find(
+                  (s) => "reverse:" + s._id === modal,
                 );
+                return sale ? (
+                  <ReverseSaleForm
+                    key={modal}
+                    sale={sale}
+                    busy={busy}
+                    onSubmit={(b) => void run("reverseSale", b)}
+                  />
+                ) : null;
               })()}
           </section>
         </div>

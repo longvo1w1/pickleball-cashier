@@ -29,7 +29,7 @@ Mở http://localhost:3000. `scripts/configure-local.mjs` tạo SESSION_SECRET v
 5. Tiền mặt/chuyển khoản/kết hợp phải bằng tổng đơn. Tiền chuyển khoản là số nhân viên xác nhận đã nhận; ứng dụng chưa tích hợp ngân hàng. Tiền mặt nhập là số ghi nhận vào quỹ, không gồm tiền trả lại khách.
 6. Manager bàn giao quyền phụ trách ca cho nhân viên khác, lưu ghi chú/audit. Tiền và kho giữ nguyên trên cùng ca; giao dịch vẫn giữ đúng nhân viên thực hiện.
 7. Chốt ca yêu cầu đếm đủ từng loại chai và tiền mặt. Thiếu/thừa = thực đếm − dự kiến. Ca đã chốt chỉ đọc; sửa kho chỉ thực hiện trong ca mở và luôn có lý do/audit.
-8. Báo cáo CSV/XLSX lấy đủ dữ liệu theo khoảng ngày/ca; XLSX mở bằng Excel. In chi tiết ca ở Quản lý ca. Màn hình tổng hợp hiển thị 200 giao dịch và 50 ca gần nhất; dùng xuất file để báo cáo đầy đủ. Ngày được tính theo Asia/Ho_Chi_Minh (UTC+7).
+8. Quản lý ca → Chi tiết lấy **toàn bộ giao dịch của đúng ca**, không bị giới hạn 200 đơn. Có báo cáo nước/Social sáng/tối/sản phẩm khác sau hoàn, danh sách Social và phương thức thu, kho và biến động, đối soát, ghi chú bàn giao; hỗ trợ Excel/CSV và in. Lịch sử ca có nút phân trang Ca cũ hơn/Ca mới hơn (50 ca/trang). Màn hình tổng hợp chung vẫn giới hạn 200 giao dịch; dùng báo cáo ca/xuất file để đối soát đầy đủ. Ngày dùng Asia/Ho_Chi_Minh (UTC+7).
 
 ## Phân quyền
 
@@ -41,7 +41,18 @@ Mở http://localhost:3000. `scripts/configure-local.mjs` tạo SESSION_SECRET v
 | Báo cáo toàn bộ, audit, danh sách nhân viên | Không   | Có      | Có     |
 | Tạo tài khoản và cấp vai trò                | Không   | Không   | Có     |
 
-Hệ thống hiện quản lý một quầy/một ca mở tại một thời điểm; unique partial index bảo vệ điều kiện này. Chưa có chỉnh sửa/vô hiệu hóa tài khoản từ UI, hoàn tiền/hủy giao dịch đã thu, đa cơ sở hoặc đồng bộ offline. Hủy món chỉ áp dụng trước khi thanh toán.
+Hệ thống hiện quản lý một quầy/một ca mở tại một thời điểm; unique partial index bảo vệ điều kiện này. Chưa có chỉnh sửa/vô hiệu hóa tài khoản từ UI, đa cơ sở hoặc đồng bộ offline.
+
+## Hoàn/hủy và tồn kho theo ca
+
+- Giao dịch → Hoàn/hủy chỉ dành cho Manager/Admin và chỉ khi **ca gốc còn mở**. Hỗ trợ hoàn/hủy toàn bộ đơn, chưa hỗ trợ hoàn một phần tiền hoặc hoàn đơn thuộc ca đã chốt. Xóa món trong giỏ chưa thanh toán không tạo giao dịch và không trừ/hoàn kho.
+- Hoàn tiền qua đúng số tiền mặt/chuyển khoản của đơn gốc. Người thao tác xác nhận hoàn tiền thực tế ngoài ứng dụng, ghi lý do và nhập riêng số chai nguyên thực nhận, bán lại được cho từng dòng; chai đã uống không tự nhập lại (mặc định 0).
+- `Reversal` giữ chứng từ hoàn riêng (unique sale và idempotency key), snapshot tiền và số chai nhận lại. Đơn gốc giữ nguyên dòng hàng, giá và tiền gốc; chỉ cập nhật trạng thái. Tất cả thao tác hoàn tiền, hoàn kho, giảm quỹ ca và audit cùng transaction. Không thể hoàn một đơn hai lần, kể cả hai request dùng key khác nhau.
+- `Stock.sold` là số lượng bán gốc, `returned` là số chai thực nhập lại. **Tồn dự kiến = đầu + nhập bổ sung − bán + hoàn kho + nhập điều chỉnh − xuất điều chỉnh**. `Movement` lưu shift, sản phẩm, người thực hiện, số lượng +/- và lý do; biến động bán/hoàn có tham chiếu đơn.
+- Chốt ca đối chiếu tổng gốc trừ Reversal với cashSales/transferSales và đối chiếu công thức kho. Nếu sổ không khớp sẽ từ chối chốt, không tự sửa số liệu. Thực đếm tiền/chai và chênh lệch được lưu; ca chốt không nhận thêm bán, hoàn, điều chỉnh hay bàn giao.
+- Với đơn kết hợp, tiền mặt được phân bổ theo thứ tự dòng rồi từng vé Social; phần còn lại là chuyển khoản. Báo cáo hiển thị số tiền từng khách theo quy tắc này. Đơn/giá/buổi và số tiền được lấy từ chứng từ, không suy ngược bằng giá catalog hiện tại.
+- Cashier được xem/in/xuất báo cáo các ca mình phụ trách/tham gia; báo cáo toàn bộ vẫn chỉ Manager/Admin. Báo cáo đọc trong transaction snapshot để không bị lệch giữa tiền, kho và Social khi đang bán đồng thời.
+- Nâng cấp schema bằng `npx tsx --env-file=.env.local scripts/prepare-ledgers.ts` (Preview) hoặc thay env-file tương ứng cho Production sau gate Preview. Lệnh chỉ chuẩn bị collection/index, không seed và không sửa dữ liệu kinh doanh. Trường mới tương thích dữ liệu cũ; không tạo bù lịch sử biến động hoặc ghi chú bàn giao vốn chưa được lưu trong bản cũ.
 
 ## Kiến trúc và dữ liệu
 
@@ -49,7 +60,7 @@ Hệ thống hiện quản lý một quầy/một ca mở tại một thời đi
 - `src/app/api/workspace`: GET dữ liệu theo quyền; POST action được Zod validate và phân quyền tại service. User role/active luôn đọc lại từ MongoDB.
 - `src/lib/service.ts`: nghiệp vụ dùng transaction replica set. Mọi thao tác bán/kiểm kê/đóng/bàn giao cùng ghi revision của ca, tránh race với chốt ca. Tồn kho giảm bằng điều kiện `remaining >= quantity`.
 - Idempotency: unique `Sale.key`, fingerprint gồm nhân viên và payload. Retry cùng key trả cùng giao dịch; khác nội dung trả 409. Khi mất kết nối, POS giữ key trong phiên giao diện để gửi lại. **Không tải lại/đóng tab khi thanh toán đang chưa rõ kết quả**; sau khi tải lại phải kiểm tra Lịch sử giao dịch trước khi thu lại. Chưa có hàng đợi thanh toán tồn tại qua tải lại trang.
-- `src/lib/models.ts`: User, Category, Product, Shift, Stock, Sale, Social, Audit, Attempt. Seed tạo tất cả indexes trước khi nhận bán hàng. Lịch sử giao dịch giữ snapshot tên/giá, sản phẩm ngừng bán không bị xóa lịch sử. Stock cuối ca được snapshot trong Shift.
+- `src/lib/models.ts`: User, Category, Product, Shift, Stock, Sale, Social, Audit, Attempt, Reversal, Movement. Seed tạo tất cả indexes trước khi nhận bán hàng. Lịch sử giao dịch giữ snapshot tên/giá, sản phẩm ngừng bán không bị xóa lịch sử. Stock cuối ca được snapshot trong Shift.
 - Không cho sửa trực tiếp giao dịch hoặc ca đã chốt qua API. Audit được ghi cùng transaction với thay đổi quan trọng. Log lỗi API không ghi request body/credentials.
 - Báo cáo CSV chống formula injection; ExcelJS ghi dữ liệu chuỗi, không nạp workbook do người dùng cung cấp. Override uuid lên bản vá tương thích API được smoke test bằng đọc lại workbook.
 
@@ -63,7 +74,7 @@ npm run test:smoke
 npm audit
 ```
 
-Unit/integration dùng Node test runner + tsx; integration tạo MongoDB 7.0.14 replica set tạm bằng mongodb-memory-server. Lần đầu cần tải binary. Bộ test không load `.env.local`, không dùng Atlas. HTTP smoke khởi chạy Next production build trên cổng 3101 với database tạm, kiểm tra auth/CSRF/RBAC, POS, Social, CSV/XLSX, chốt ca và audit, rồi tắt server/xóa MongoDB tạm. Chạy smoke sau build. CI chạy typecheck, 19 tests, build và 14 HTTP smoke checks.
+Unit/integration dùng Node test runner + tsx; integration tạo MongoDB 7.0.14 replica set tạm bằng mongodb-memory-server. Lần đầu cần tải binary. Bộ test không load `.env.local`, không dùng Atlas. HTTP smoke khởi chạy Next production build trên cổng 3101 với database tạm, kiểm tra auth/CSRF/RBAC, POS, Social, hoàn/hủy và hoàn kho, JSON/CSV/XLSX theo ca, chốt ca và audit, rồi tắt server/xóa MongoDB tạm. Chạy smoke sau build. CI chạy typecheck, 29 tests, build và 17 HTTP smoke checks.
 
 ## Triển khai Vercel
 

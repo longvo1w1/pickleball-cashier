@@ -253,6 +253,11 @@ td {
   border-radius: 20px;
   padding: 28px;
 }
+@media screen {
+  .dialog:has(.shift-report) {
+    max-width: 1100px;
+  }
+}
 .mobile-nav {
   display: none;
 }

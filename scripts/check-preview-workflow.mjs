@@ -5,7 +5,16 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import mongoose from "mongoose";
 import { hash } from "bcryptjs";
-import { User, Shift, Stock, Sale, Social, Audit } from "../src/lib/models.ts";
+import {
+  User,
+  Shift,
+  Stock,
+  Sale,
+  Social,
+  Audit,
+  Reversal,
+  Movement,
+} from "../src/lib/models.ts";
 if (process.exitCode) process.exit(process.exitCode);
 assert.equal(
   new URL(process.env.MONGODB_URI).pathname,
@@ -159,13 +168,47 @@ try {
   );
   assert.equal((await request("/api/reports", undefined, cashier)).status, 403);
   pass("cashier RBAC on deployed API");
+  const refund = {
+    key: crypto.randomUUID(),
+    shift: shift._id,
+    sale: sale._id,
+    kind: "refund",
+    reason: "QA PREVIEW only one unopened bottle returned",
+    restock: [{ lineIndex: 0, quantity: 1 }],
+  };
+  await action(cashier, "reverseSale", refund, 403);
+  const reversal = await action(admin, "reverseSale", refund);
+  const refundRetry = await action(admin, "reverseSale", refund);
+  assert.equal(reversal._id, refundRetry._id);
+  assert.equal(reversal.cash, 15000);
+  assert.equal(reversal.transfer, 25000);
+  let full = json(
+    await request(
+      "/api/reports?format=json&shift=" + shift._id,
+      undefined,
+      cashier,
+    ),
+  );
+  assert.equal(full.revenue.net, 55000);
+  assert.equal(full.revenue.cash, 25000);
+  assert.equal(full.revenue.transfer, 30000);
+  assert.equal(full.stocks.find((s) => s.product === product._id).returned, 1);
+  assert.equal(full.stocks.find((s) => s.product === product._id).expected, 3);
+  assert.equal(full.social[0].name, "QA PREVIEW disposable Social guest");
+  assert.equal(full.social[0].transfer, 30000);
+  assert.equal(full.reconciliation.totalsMatch, true);
+  assert.equal(full.reconciliation.stockMatches, true);
+  pass(
+    "refund split, partial usable-bottle return, retry and full shift report",
+  );
   const closed = await action(cashier, "closeShift", {
     shift: shift._id,
-    countedCash: 139000,
+    countedCash: 124000,
     counts: workspace.stocks.map((s) => ({
       product: s.product,
-      counted: s.product === product._id ? 1 : s.remaining,
+      counted: s.product === product._id ? 2 : s.remaining,
     })),
+    note: "QA PREVIEW cash and stock counted after refund",
   });
   assert.equal(closed.cashDifference, -1000);
   assert.equal(
@@ -179,14 +222,34 @@ try {
     409,
   );
   pass("cash/stock reconciliation and closed-shift immutability");
+  await action(
+    admin,
+    "reverseSale",
+    { ...refund, key: crypto.randomUUID() },
+    409,
+  );
+  full = json(
+    await request(
+      "/api/reports?format=json&shift=" + shift._id,
+      undefined,
+      cashier,
+    ),
+  );
+  assert.equal(full.revenue.net, 55000);
+  assert.equal(full.reconciliation.countedCash, 124000);
+  assert.equal(
+    full.shift.closingNote,
+    "QA PREVIEW cash and stock counted after refund",
+  );
+  pass("historical closed report and blocked closed-shift refund");
   const report = await request(
     "/api/reports?format=csv&shift=" + shift._id,
     undefined,
     admin,
   );
   assert.equal(report.status, 200);
-  assert.ok(report.body.toString().includes("95000"));
-  pass("shift report matches 95,000 VND test revenue");
+  assert.ok(report.body.toString().includes("55000"));
+  pass("shift report matches 55,000 VND net test revenue after refund");
   console.log(`PREVIEW_WORKFLOW_RESULT ${checks}/${checks} PASS.`);
 } catch (e) {
   console.error("Preview workflow FAIL:", e.message);
@@ -215,6 +278,8 @@ try {
             { session },
           );
           await Social.deleteMany({ shift: shift._id }, { session });
+          await Reversal.deleteMany({ shift: shift._id }, { session });
+          await Movement.deleteMany({ shift: shift._id }, { session });
           await Stock.deleteMany({ shift: shift._id }, { session });
           await Shift.deleteOne(
             { _id: shift._id, openedBy: qa._id },

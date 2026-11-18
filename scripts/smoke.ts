@@ -217,13 +217,50 @@ async function main() {
     assert.equal(workspace.audits.length, 0);
     assert.equal(workspace.sales.length, 2);
     check("Workspace restricts management data");
+    const reversal = {
+      key: crypto.randomUUID(),
+      shift: shift._id,
+      sale: sale._id,
+      kind: "refund",
+      reason: "HTTP smoke return of two intact bottles",
+      restock: [{ lineIndex: 0, quantity: 2 }],
+    };
+    r = await request("/api/workspace", cashier, {
+      action: "reverseSale",
+      data: reversal,
+    });
+    assert.equal(r.status, 403);
+    r = await request("/api/workspace", admin, {
+      action: "reverseSale",
+      data: reversal,
+    });
+    assert.equal(r.status, 200);
+    const reversed = await r.json();
+    r = await request("/api/workspace", admin, {
+      action: "reverseSale",
+      data: reversal,
+    });
+    assert.equal((await r.json())._id, reversed._id);
+    assert.equal((await Stock.findOne()).remaining, 27);
+    check("Refund authorization, original split and idempotent stock return");
+    r = await request("/api/reports?format=json&shift=" + shift._id, cashier);
+    assert.equal(r.status, 200);
+    const detail = await r.json();
+    assert.equal(detail.revenue.gross, 70000);
+    assert.equal(detail.revenue.net, 30000);
+    assert.equal(detail.revenue.cash, 30000);
+    assert.equal(detail.revenue.transfer, 0);
+    assert.equal(detail.social[0].name, "Social Test");
+    assert.equal(detail.social[0].paid, 30000);
+    assert.equal(detail.reconciliation.totalsMatch, true);
+    check("Owned shift report reconciles refund and Social payment details");
     r = await request("/api/reports?format=csv&shift=" + shift._id, admin);
     assert.equal(r.status, 200);
     const csv = await r.text();
     assert.ok(
       csv.includes("Revive") &&
-        csv.includes("Social Test") === false &&
-        csv.includes("70000"),
+        csv.includes("Social Test") &&
+        csv.includes("30000"),
     );
     check("CSV shift report includes reconciled revenue");
     r = await request("/api/reports?format=xlsx&shift=" + shift._id, admin);
@@ -240,8 +277,9 @@ async function main() {
       action: "closeShift",
       data: {
         shift: shift._id,
-        countedCash: 138000,
-        counts: [{ product: String(p._id), counted: 24 }],
+        countedCash: 128000,
+        counts: [{ product: String(p._id), counted: 26 }],
+        note: "HTTP smoke closing note",
       },
     });
     assert.equal(r.status, 200);
@@ -256,6 +294,20 @@ async function main() {
     assert.equal(r.status, 409);
     assert.equal(await Sale.countDocuments(), 2);
     check("Closed shift blocks new sales");
+    r = await request("/api/workspace", admin, {
+      action: "reverseSale",
+      data: { ...reversal, key: crypto.randomUUID() },
+    });
+    assert.equal(r.status, 409);
+    r = await request("/api/reports?format=json&shift=" + shift._id, cashier);
+    assert.equal(r.status, 200);
+    const closedReport = await r.json();
+    assert.equal(closedReport.shift.closingNote, "HTTP smoke closing note");
+    assert.equal(closedReport.stocks[0].counted, 26);
+    assert.equal(closedReport.reconciliation.difference, -2000);
+    check(
+      "Closed reports retain counted stock, cash and notes; refunds blocked",
+    );
     assert.ok(await Audit.countDocuments({ action: "shift.close" }));
     assert.equal((await Shift.findById(shift._id)).status, "closed");
     check("Audit trail persisted");

@@ -11,6 +11,8 @@ import {
   Social,
   Stock,
   User,
+  Reversal,
+  Movement,
 } from "./models";
 import {
   amount,
@@ -18,8 +20,11 @@ import {
   checkoutSchema,
   id,
   productInput,
+  reversalInput,
+  unitPayment,
 } from "./domain";
 import { HttpError, roles } from "./auth";
+import { buildShiftReport } from "./shift-report";
 type Actor = { _id: mongoose.Types.ObjectId; role: string; name?: string };
 async function audit(
   u: Actor,
@@ -28,7 +33,11 @@ async function audit(
   details: unknown,
   session: ClientSession,
 ) {
-  await Audit.create([{ actor: u._id, action, entity, details }], { session });
+  const shift = (details as { shift?: string })?.shift;
+  await Audit.create(
+    [{ actor: u._id, action, entity, details, ...(shift ? { shift } : {}) }],
+    { session },
+  );
 }
 async function lockShift(shift: string, u: Actor, session: ClientSession) {
   const s = await Shift.findOneAndUpdate(
@@ -59,6 +68,7 @@ export async function checkout(u: Actor, input: unknown) {
     return await mongoose.connection.transaction(async (session) => {
       const s = await lockShift(b.shift, u, session);
       const lines = [];
+      const movementIds: mongoose.Types.ObjectId[] = [];
       let total = 0;
       for (const l of b.lines) {
         const p = await Product.findOne({
@@ -77,6 +87,21 @@ export async function checkout(u: Actor, input: unknown) {
             { session, returnDocument: "after" },
           );
           if (!stock) throw new HttpError(409, `Không đủ tồn: ${p.name}`);
+          const [movement] = await Movement.create(
+            [
+              {
+                shift: s._id,
+                product: p._id,
+                name: p.name,
+                actor: u._id,
+                kind: "sale",
+                quantity: -l.quantity,
+                reason: "Bán hàng",
+              },
+            ],
+            { session },
+          );
+          movementIds.push(movement._id);
         }
         if (
           p.kind === "social" &&
@@ -87,12 +112,24 @@ export async function checkout(u: Actor, input: unknown) {
           throw new HttpError(400, "Chỉ vé Social mới có khách");
         const subtotal = v.price * l.quantity;
         total += subtotal;
+        const guestNames = [...(l.guests || [])];
+        for (const guestId of l.socialIds || []) {
+          const g = await Social.findOne({
+            _id: guestId,
+            shift: s._id,
+            paid: false,
+          }).session(session);
+          if (!g)
+            throw new HttpError(409, "Khách đã thanh toán hoặc không thuộc ca");
+          guestNames.push(g.name);
+        }
         lines.push({
           ...l,
           name: p.name,
           kind: p.kind,
           price: v.price,
           subtotal,
+          guestNames,
         });
       }
       assertPayment(total, b.cash, b.transfer);
@@ -111,30 +148,73 @@ export async function checkout(u: Actor, input: unknown) {
         ],
         { session },
       );
-      for (const l of lines) {
-        if (l.kind !== "social") continue;
+      if (movementIds.length)
+        await Movement.updateMany(
+          { _id: { $in: movementIds } },
+          { $set: { sale: sale._id } },
+          { session },
+        );
+      let offset = 0;
+      for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+        const l = lines[lineIndex];
+        if (l.kind !== "social") {
+          offset += l.subtotal;
+          continue;
+        }
         const period = l.variant === "Sáng" ? "morning" : "evening";
-        for (const name of l.guests || [])
+        let guestIndex = 0;
+        for (const name of l.guests || []) {
           await Social.create(
-            [{ name, period, shift: s._id, paid: true, sale: sale._id }],
+            [
+              {
+                name,
+                period,
+                shift: s._id,
+                paid: true,
+                sale: sale._id,
+                lineIndex,
+                ticketPrice: l.price,
+                paymentStatus: "paid",
+                ...unitPayment(b.cash, offset + guestIndex * l.price, l.price),
+              },
+            ],
             { session },
           );
+          guestIndex++;
+        }
         for (const guest of l.socialIds || []) {
           const paid = await Social.findOneAndUpdate(
             { _id: guest, shift: s._id, period, paid: false },
-            { $set: { paid: true, sale: sale._id } },
+            {
+              $set: {
+                paid: true,
+                sale: sale._id,
+                lineIndex,
+                ticketPrice: l.price,
+                paymentStatus: "paid",
+                ...unitPayment(b.cash, offset + guestIndex * l.price, l.price),
+              },
+            },
             { session, returnDocument: "after" },
           );
           if (!paid)
             throw new HttpError(409, "Khách đã thanh toán hoặc sai buổi");
+          guestIndex++;
         }
+        offset += l.subtotal;
       }
       await Shift.updateOne(
         { _id: s._id },
         { $inc: { cashSales: b.cash, transferSales: b.transfer } },
         { session },
       );
-      await audit(u, "sale.create", String(sale._id), { total }, session);
+      await audit(
+        u,
+        "sale.create",
+        String(sale._id),
+        { total, shift: String(s._id) },
+        session,
+      );
       return sale;
     });
   } catch (e) {
@@ -146,16 +226,152 @@ export async function checkout(u: Actor, input: unknown) {
     throw e;
   }
 }
+export async function reverseSale(u: Actor, input: unknown) {
+  roles(u, ["Admin", "Manager"]);
+  const b = reversalInput.parse(input);
+  await db();
+  await Reversal.init();
+  const fingerprint = createHash("sha256")
+    .update(JSON.stringify({ actor: String(u._id), ...b }))
+    .digest("hex");
+  const existing = await Reversal.findOne({ key: b.key });
+  if (existing) {
+    if (existing.fingerprint !== fingerprint)
+      throw new HttpError(409, "Khóa hoàn tiền đã dùng cho nội dung khác");
+    return existing;
+  }
+  try {
+    return await mongoose.connection.transaction(async (session) => {
+      const committed = await Reversal.findOne({ key: b.key }).session(session);
+      if (committed) {
+        if (committed.fingerprint !== fingerprint)
+          throw new HttpError(409, "Khóa hoàn tiền đã dùng cho nội dung khác");
+        return committed;
+      }
+      await lockShift(b.shift, u, session);
+      const sale = await Sale.findOne({ _id: b.sale, shift: b.shift }).session(
+        session,
+      );
+      if (!sale) throw new HttpError(404, "Đơn hàng không thuộc ca");
+      if (
+        (await Reversal.exists({ sale: sale._id }).session(session)) ||
+        sale.status === "refunded" ||
+        sale.status === "cancelled"
+      )
+        throw new HttpError(409, "Đơn đã hoàn hoặc hủy");
+      const bottled = sale.lines.flatMap(
+        (l: { kind: string; quantity: number }, i: number) =>
+          l.kind === "bottle" ? [i] : [],
+      );
+      if (
+        b.restock.length !== bottled.length ||
+        bottled.some((i: number) => !b.restock.some((r) => r.lineIndex === i))
+      )
+        throw new HttpError(
+          400,
+          "Phải xác nhận số chai nhập lại cho từng dòng nước đóng chai",
+        );
+      for (const r of b.restock) {
+        const l = sale.lines[r.lineIndex];
+        if (!l || l.kind !== "bottle" || r.quantity > l.quantity)
+          throw new HttpError(400, "Số chai hoàn kho không hợp lệ");
+      }
+      const [reversal] = await Reversal.create(
+        [
+          {
+            ...b,
+            fingerprint,
+            actor: u._id,
+            total: sale.total,
+            cash: sale.cash,
+            transfer: sale.transfer,
+          },
+        ],
+        { session },
+      );
+      for (const r of b.restock) {
+        if (!r.quantity) continue;
+        const l = sale.lines[r.lineIndex];
+        const st = await Stock.findOneAndUpdate(
+          { shift: b.shift, product: l.product },
+          { $inc: { remaining: r.quantity, returned: r.quantity } },
+          { session, returnDocument: "after" },
+        );
+        if (!st) throw new HttpError(409, "Không tìm thấy kho của ca");
+        await Movement.create(
+          [
+            {
+              shift: b.shift,
+              product: l.product,
+              name: l.name,
+              actor: u._id,
+              kind: "return",
+              quantity: r.quantity,
+              sale: sale._id,
+              reversal: reversal._id,
+              reason: b.reason,
+            },
+          ],
+          { session },
+        );
+      }
+      sale.status = b.kind === "cancel" ? "cancelled" : "refunded";
+      await sale.save({ session });
+      await Social.updateMany(
+        { shift: b.shift, sale: sale._id },
+        { $set: { paid: false, paymentStatus: sale.status } },
+        { session },
+      );
+      await Shift.updateOne(
+        { _id: b.shift },
+        { $inc: { cashSales: -sale.cash, transferSales: -sale.transfer } },
+        { session },
+      );
+      await audit(
+        u,
+        "sale." + b.kind,
+        String(sale._id),
+        {
+          shift: b.shift,
+          reversal: String(reversal._id),
+          reason: b.reason,
+          cash: sale.cash,
+          transfer: sale.transfer,
+          restock: b.restock,
+        },
+        session,
+      );
+      return reversal;
+    });
+  } catch (e) {
+    if ((e as { code?: number }).code === 11000) {
+      const r = await Reversal.findOne({ key: b.key });
+      if (r?.fingerprint === fingerprint) return r;
+      throw new HttpError(409, "Đơn đã hoàn hoặc hủy");
+    }
+    throw e;
+  }
+}
 export async function mutate(u: Actor, action: string, input: unknown) {
   await db();
   if (action === "checkout") return checkout(u, input);
+  if (action === "reverseSale") return reverseSale(u, input);
   return mongoose.connection.transaction(async (session) => {
     const manager = ["Admin", "Manager"];
     switch (action) {
       case "openShift": {
         const b = z.object({ openingCash: amount }).parse(input);
         const [s] = await Shift.create(
-          [{ openingCash: b.openingCash, openedBy: u._id, cashier: u._id }],
+          [
+            {
+              openingCash: b.openingCash,
+              openedBy: u._id,
+              cashier: u._id,
+              cashierName: u.name,
+              openedByName: u.name,
+              participants: [u._id],
+            },
+          ],
           { session },
         );
         const products = await Product.find({
@@ -168,13 +384,35 @@ export async function mutate(u: Actor, action: string, input: unknown) {
               {
                 shift: s._id,
                 product: p._id,
+                name: p.name,
                 opening: p.defaultStock,
                 remaining: p.defaultStock,
               },
             ],
             { session },
           );
-        await audit(u, "shift.open", String(s._id), b, session);
+        for (const p of products)
+          await Movement.create(
+            [
+              {
+                shift: s._id,
+                product: p._id,
+                name: p.name,
+                actor: u._id,
+                kind: "opening",
+                quantity: p.defaultStock,
+                reason: "Tồn đầu ca",
+              },
+            ],
+            { session },
+          );
+        await audit(
+          u,
+          "shift.open",
+          String(s._id),
+          { ...b, shift: String(s._id) },
+          session,
+        );
         return s;
       }
       case "handover": {
@@ -186,7 +424,7 @@ export async function mutate(u: Actor, action: string, input: unknown) {
             note: z.string().trim().min(1).max(500),
           })
           .parse(input);
-        await lockShift(b.shift, u, session);
+        const current = await lockShift(b.shift, u, session);
         const target = await User.findOne({
           _id: b.cashier,
           active: true,
@@ -194,7 +432,27 @@ export async function mutate(u: Actor, action: string, input: unknown) {
         if (!target) throw new HttpError(400, "Nhân viên không hợp lệ");
         await Shift.updateOne(
           { _id: b.shift },
-          { $set: { cashier: target._id } },
+          {
+            $set: { cashier: target._id, cashierName: target.name },
+            $addToSet: {
+              participants: { $each: [current.cashier, target._id] },
+            },
+            $push: {
+              handovers: {
+                at: new Date(),
+                actor: u._id,
+                from: current.cashier,
+                to: target._id,
+                fromName:
+                  current.cashierName ||
+                  (await User.findById(current.cashier).session(session))
+                    ?.name ||
+                  "—",
+                toName: target.name,
+                note: b.note,
+              },
+            },
+          },
           { session },
         );
         await audit(u, "shift.handover", b.shift, b, session);
@@ -205,6 +463,7 @@ export async function mutate(u: Actor, action: string, input: unknown) {
           .object({
             shift: id,
             countedCash: amount,
+            note: z.string().trim().max(500).default(""),
             counts: z.array(
               z.object({
                 product: id,
@@ -214,6 +473,15 @@ export async function mutate(u: Actor, action: string, input: unknown) {
           })
           .parse(input);
         const s = await lockShift(b.shift, u, session);
+        const reconciliation = await buildShiftReport(b.shift, session);
+        if (
+          !reconciliation.reconciliation.totalsMatch ||
+          !reconciliation.reconciliation.stockMatches
+        )
+          throw new HttpError(
+            409,
+            "Dữ liệu đối soát không khớp sổ giao dịch hoặc công thức kho; chưa thể chốt ca",
+          );
         const stocks = await Stock.find({ shift: s._id }).session(session);
         if (
           b.counts.length !== stocks.length ||
@@ -235,12 +503,18 @@ export async function mutate(u: Actor, action: string, input: unknown) {
         s.closedBy = u._id;
         s.closedAt = new Date();
         s.stockSnapshot = snapshot;
+        s.closingNote = b.note;
         await s.save({ session });
         await audit(
           u,
           "shift.close",
           String(s._id),
-          { countedCash: b.countedCash, difference: s.cashDifference },
+          {
+            countedCash: b.countedCash,
+            difference: s.cashDifference,
+            shift: b.shift,
+            note: b.note,
+          },
           session,
         );
         return s;
@@ -274,11 +548,31 @@ export async function mutate(u: Actor, action: string, input: unknown) {
             $inc: {
               remaining: b.quantity,
               [b.mode === "restock" ? "added" : "adjustment"]: b.quantity,
+              ...(b.mode === "adjust"
+                ? {
+                    [b.quantity > 0 ? "adjustmentIn" : "adjustmentOut"]:
+                      Math.abs(b.quantity),
+                  }
+                : {}),
             },
           },
           { returnDocument: "after", session },
         );
         if (!st) throw new HttpError(409, "Tồn kho không hợp lệ");
+        await Movement.create(
+          [
+            {
+              shift: b.shift,
+              product: b.product,
+              name: st.name,
+              actor: u._id,
+              kind: b.mode,
+              quantity: b.quantity,
+              reason: b.reason,
+            },
+          ],
+          { session },
+        );
         await audit(u, "stock." + b.mode, String(st._id), b, session);
         return st;
       }
@@ -291,7 +585,18 @@ export async function mutate(u: Actor, action: string, input: unknown) {
           })
           .parse(input);
         await lockShift(b.shift, u, session);
-        const [guest] = await Social.create([b], { session });
+        const ticket = await Product.findOne({
+          kind: "social",
+          active: true,
+          "variants.name": b.period === "morning" ? "Sáng" : "Tối",
+        }).session(session);
+        const price = ticket?.variants.find(
+          (v: { name: string }) =>
+            v.name === (b.period === "morning" ? "Sáng" : "Tối"),
+        )?.price;
+        const [guest] = await Social.create([{ ...b, ticketPrice: price }], {
+          session,
+        });
         await audit(u, "social.join", String(guest._id), b, session);
         return guest;
       }
@@ -333,6 +638,7 @@ export async function mutate(u: Actor, action: string, input: unknown) {
             {
               $setOnInsert: {
                 opening: 0,
+                name: p.name,
                 remaining: 0,
                 added: 0,
                 sold: 0,
