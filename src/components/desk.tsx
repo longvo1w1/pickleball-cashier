@@ -67,6 +67,7 @@ type Sale = {
   transfer: number;
   lines: {
     name: string;
+    kind: string;
     variant: string;
     quantity: number;
     subtotal: number;
@@ -1459,11 +1460,7 @@ export function Desk() {
                           String(
                             ss
                               .flatMap((s) => s.lines)
-                              .filter(
-                                (l) =>
-                                  data.products.find((p) => p.name === l.name)
-                                    ?.kind === "social",
-                              )
+                              .filter((l) => l.kind === "social")
                               .reduce((n, l) => n + l.quantity, 0),
                           ),
                         ],
