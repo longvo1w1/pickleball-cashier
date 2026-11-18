@@ -1,0 +1,81 @@
+# CourtDesk — Pickleball Cashier
+
+Ứng dụng thu ngân tiếng Việt dùng Next.js App Router, TypeScript, Tailwind v4, shadcn/ui Button (Radix/CVA), MongoDB Atlas/Mongoose và Vercel. Không có chế độ dữ liệu giả hoặc fallback localStorage cho dữ liệu kinh doanh.
+
+## Chạy local
+
+Yêu cầu Node.js 24, npm và MongoDB replica set (Atlas hỗ trợ transaction).
+
+```powershell
+npm ci
+Copy-Item .env.example .env.local
+# Sửa MONGODB_URI trỏ tới database RIÊNG của ứng dụng.
+node scripts/configure-local.mjs
+npm run check:atlas
+$env:ALLOW_SEED='true'
+npm run seed
+Remove-Item Env:ALLOW_SEED
+npm run dev
+```
+
+Mở http://localhost:3000. `scripts/configure-local.mjs` tạo SESSION_SECRET và mật khẩu Admin ngẫu nhiên trong `.env.local` được Git bỏ qua; không in secrets. Xem `SEED_ADMIN_EMAIL` và `SEED_ADMIN_PASSWORD` trong file này để đăng nhập. Seed chỉ thêm tài khoản quản trị và catalog khi chưa tồn tại, không ghi đè giá hiện có, không tạo ca, khách hoặc giao dịch. Giữ `ALLOW_SEED=false` ngoài lệnh seed được chủ động thực hiện. Không dùng database từ hệ thống production khác.
+
+## Quy trình vận hành
+
+1. Admin tạo nhân viên (Manager/Cashier) ở Thiết lập. Manager quản lý danh mục, sản phẩm và kho.
+2. Nhân viên mở ca, nhập tiền mặt đầu ca; mỗi loại chai đang bán lấy tồn đầu ca theo cấu hình (mặc định 24). Đối chiếu tồn thực tế; Manager ghi điều chỉnh có lý do nếu khác. Sản phẩm chai thêm giữa ca có tồn 0 và cần nhập bổ sung.
+3. POS lấy giá phía server. Không đá/có đá cùng trừ một chai của sản phẩm. Trà đá pha chế, vé Social và sản phẩm khác không kiểm đếm chai.
+4. Social: ghi tên và buổi tham gia, sau đó Thu tiền để đưa vào giỏ; hoặc thêm vé trực tiếp tại POS và điền tên từng khách. Tên tùy chọn vé phải là `Sáng`/`Tối`.
+5. Tiền mặt/chuyển khoản/kết hợp phải bằng tổng đơn. Tiền chuyển khoản là số nhân viên xác nhận đã nhận; ứng dụng chưa tích hợp ngân hàng. Tiền mặt nhập là số ghi nhận vào quỹ, không gồm tiền trả lại khách.
+6. Manager bàn giao quyền phụ trách ca cho nhân viên khác, lưu ghi chú/audit. Tiền và kho giữ nguyên trên cùng ca; giao dịch vẫn giữ đúng nhân viên thực hiện.
+7. Chốt ca yêu cầu đếm đủ từng loại chai và tiền mặt. Thiếu/thừa = thực đếm − dự kiến. Ca đã chốt chỉ đọc; sửa kho chỉ thực hiện trong ca mở và luôn có lý do/audit.
+8. Báo cáo CSV/XLSX lấy đủ dữ liệu theo khoảng ngày/ca; XLSX mở bằng Excel. In chi tiết ca ở Quản lý ca. Màn hình tổng hợp hiển thị 200 giao dịch và 50 ca gần nhất; dùng xuất file để báo cáo đầy đủ. Ngày được tính theo Asia/Ho_Chi_Minh (UTC+7).
+
+## Phân quyền
+
+| Tác vụ                                      | Cashier | Manager | Admin  |
+| ------------------------------------------- | ------- | ------- | ------ |
+| POS, Social, mở/chốt ca phụ trách           | Có      | Có      | Có     |
+| Xem giao dịch cá nhân                       | Có      | Tất cả  | Tất cả |
+| Quản lý catalog, điều chỉnh kho, bàn giao   | Không   | Có      | Có     |
+| Báo cáo toàn bộ, audit, danh sách nhân viên | Không   | Có      | Có     |
+| Tạo tài khoản và cấp vai trò                | Không   | Không   | Có     |
+
+Hệ thống hiện quản lý một quầy/một ca mở tại một thời điểm; unique partial index bảo vệ điều kiện này. Chưa có chỉnh sửa/vô hiệu hóa tài khoản từ UI, hoàn tiền/hủy giao dịch đã thu, đa cơ sở hoặc đồng bộ offline. Hủy món chỉ áp dụng trước khi thanh toán.
+
+## Kiến trúc và dữ liệu
+
+- `src/app/api/auth`: bcrypt, JWT HS256 12 giờ, cookie HttpOnly/Secure/SameSite Strict; kiểm tra Origin và giới hạn 10 lần đăng nhập/email/15 phút trong MongoDB.
+- `src/app/api/workspace`: GET dữ liệu theo quyền; POST action được Zod validate và phân quyền tại service. User role/active luôn đọc lại từ MongoDB.
+- `src/lib/service.ts`: nghiệp vụ dùng transaction replica set. Mọi thao tác bán/kiểm kê/đóng/bàn giao cùng ghi revision của ca, tránh race với chốt ca. Tồn kho giảm bằng điều kiện `remaining >= quantity`.
+- Idempotency: unique `Sale.key`, fingerprint gồm nhân viên và payload. Retry cùng key trả cùng giao dịch; khác nội dung trả 409. Khi mất kết nối, POS giữ key trong phiên giao diện để gửi lại. **Không tải lại/đóng tab khi thanh toán đang chưa rõ kết quả**; sau khi tải lại phải kiểm tra Lịch sử giao dịch trước khi thu lại. Chưa có hàng đợi thanh toán tồn tại qua tải lại trang.
+- `src/lib/models.ts`: User, Category, Product, Shift, Stock, Sale, Social, Audit, Attempt. Seed tạo tất cả indexes trước khi nhận bán hàng. Lịch sử giao dịch giữ snapshot tên/giá, sản phẩm ngừng bán không bị xóa lịch sử. Stock cuối ca được snapshot trong Shift.
+- Không cho sửa trực tiếp giao dịch hoặc ca đã chốt qua API. Audit được ghi cùng transaction với thay đổi quan trọng. Log lỗi API không ghi request body/credentials.
+- Báo cáo CSV chống formula injection; ExcelJS ghi dữ liệu chuỗi, không nạp workbook do người dùng cung cấp. Override uuid lên bản vá tương thích API được smoke test bằng đọc lại workbook.
+
+## Kiểm thử
+
+```powershell
+npm run typecheck
+npm test
+npm run build
+npm run test:smoke
+npm audit
+```
+
+Unit/integration dùng Node test runner + tsx; integration tạo MongoDB 7.0.14 replica set tạm bằng mongodb-memory-server. Lần đầu cần tải binary. Bộ test không load `.env.local`, không dùng Atlas. HTTP smoke khởi chạy Next production build trên cổng 3101 với database tạm, kiểm tra auth/CSRF/RBAC, POS, Social, CSV/XLSX, chốt ca và audit, rồi tắt server/xóa MongoDB tạm. Chạy smoke sau build. CI chạy typecheck, 19 tests và build; smoke có thể chạy riêng khi cần kiểm tra HTTP.
+
+## Triển khai Vercel
+
+1. Tạo project Next.js trong tài khoản/team được ủy quyền, liên kết repository. Không tự bật production từ nhánh chính trước khi Preview PASS.
+2. Khai báo Environment Variables cho **Preview**: `MONGODB_URI` chứa tên database preview riêng, `SESSION_SECRET` ngẫu nhiên ít nhất 32 ký tự. Không đưa seed password lên Vercel. Bật system environment variables để có `VERCEL_URL`.
+3. `APP_ORIGIN`: local đặt `http://localhost:3000`; Vercel Preview có thể bỏ trống và ứng dụng dùng `https://${VERCEL_URL}`. Dùng URL deployment chính xác khi kiểm thử, alias khác cần `APP_ORIGIN` tương ứng. Production đặt đúng origin HTTPS chính thức.
+4. Seed catalog/admin có kiểm soát vào đúng database trước khi vận hành. Atlas database user chỉ cấp quyền database của ứng dụng. Cấu hình Atlas network access để Vercel kết nối; chọn networking phù hợp tài khoản/plan, không tự đổi access list của cluster dùng chung.
+5. `vercel --target=preview` → kiểm tra đăng nhập, role, mở/thu/chốt ca **chỉ trên database kiểm thử**, mobile 390px, iPad 768/1024px, in và download. Vercel deployment protection có thể yêu cầu đăng nhập tài khoản được cấp quyền.
+6. Chỉ sau khi Preview và các gate đều PASS mới cấu hình database **Production riêng**, tạo tài khoản thật/catalog và deploy `vercel --prod`. Không chạy smoke/seed giao dịch giả trên Production. Không dùng cùng database Preview và Production.
+
+Secrets chỉ nằm trong environment variables hoặc `.env.local`; `.env*`, `.vercel`, `.cache`, build artifacts đều được Git bỏ qua. Nếu credential bị lộ, chủ tài khoản cần rotate trước khi Production. Backup, retention/audit, giám sát lỗi và chính sách tài khoản phải được chủ sân cấu hình trước vận hành thực tế.
+
+## Tài liệu nền tảng
+
+[Next.js authentication](https://nextjs.org/docs/app/guides/authentication) · [Mongoose transactions](https://mongoosejs.com/docs/transactions.html)
